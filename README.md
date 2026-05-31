@@ -97,6 +97,7 @@ frss:xPathItemTimeFormat
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
+npm install
 python scripts/build_feed.py
 python -m http.server 8000 --directory public
 ```

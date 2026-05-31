@@ -33,13 +33,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+
+      - name: Install Reader View dependencies
+        run: npm install --no-audit --no-fund
 
       - name: Build RSS feeds
         env:
           FEED_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-          USER_AGENT: Mozilla/5.0 (Android 15; Mobile; rv:139.0) Gecko/139.0 Firefox/139.0
           EXTRACT_FULL_CONTENT: "readability"
           MAX_ITEMS: "50"
         run: python scripts/build_feed.py

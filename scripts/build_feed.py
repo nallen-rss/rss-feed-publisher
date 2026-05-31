@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import format_datetime
@@ -15,7 +16,6 @@ from zoneinfo import ZoneInfo
 import requests
 from dateutil import parser as date_parser
 from lxml import html
-from readability import Document
 
 
 TEMPLATE_DIR = Path(os.environ.get("TEMPLATE_DIR", "templates"))
@@ -24,9 +24,8 @@ OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "public"))
 FEEDS_DIR = OUTPUT_DIR / "feeds"
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "50"))
 FEED_BASE_URL = os.environ.get("FEED_BASE_URL", "").strip().rstrip("/")
-USER_AGENT = os.environ.get(
-    "USER_AGENT",
-    "Mozilla/5.0 (Android 15; Mobile; rv:139.0) Gecko/139.0 Firefox/139.0",
+FIREFOX_ANDROID_USER_AGENT = (
+    "Mozilla/5.0 (Android 15; Mobile; rv:139.0) Gecko/139.0 Firefox/139.0"
 )
 DEFAULT_TIMEZONE = ZoneInfo(os.environ.get("DEFAULT_TIMEZONE", "America/New_York"))
 EXTRACT_FULL_CONTENT = os.environ.get("EXTRACT_FULL_CONTENT", "").lower() in {
@@ -178,11 +177,11 @@ def template_from_outline(outline: ElementTree.Element, used_slugs: set[str]) ->
     )
 
 
-def fetch_html(url: str, user_agent: str) -> bytes:
+def fetch_html(url: str) -> bytes:
     response = requests.get(
         url,
         headers={
-            "User-Agent": user_agent,
+            "User-Agent": FIREFOX_ANDROID_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         },
@@ -240,14 +239,23 @@ def extract_with_css_selector(content: bytes, url: str, selector: str, remove_se
     return "".join(parts).strip()
 
 
-def extract_with_readability(content: bytes, url: str) -> str:
-    article = Document(content.decode("utf-8", errors="replace")).summary(html_partial=True)
-    fragment = html.fragment_fromstring(article, create_parent="div", base_url=url)
-    fragment.make_links_absolute(url)
-    return "".join(
-        html.tostring(child, encoding="unicode", method="html")
-        for child in fragment
-    ).strip()
+def extract_with_mozilla_readability(content: bytes, url: str) -> str:
+    helper = Path(__file__).with_name("readability.mjs")
+    payload = json.dumps(
+        {
+            "url": url,
+            "html": content.decode("utf-8", errors="replace"),
+        }
+    )
+    result = subprocess.run(
+        ["node", str(helper)],
+        input=payload,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    article = json.loads(result.stdout)
+    return article.get("content", "").strip()
 
 
 def full_article_content(template: FeedTemplate, link: str) -> str:
@@ -255,7 +263,7 @@ def full_article_content(template: FeedTemplate, link: str) -> str:
         return ""
 
     try:
-        content = fetch_html(link, USER_AGENT)
+        content = fetch_html(link)
         if template.css_full_content:
             extracted = extract_with_css_selector(
                 content,
@@ -265,7 +273,7 @@ def full_article_content(template: FeedTemplate, link: str) -> str:
             )
             if extracted:
                 return extracted
-        return extract_with_readability(content, link)
+        return extract_with_mozilla_readability(content, link)
     except Exception as error:
         print(f"Full-content extraction failed for {link}: {error}")
         return ""
@@ -324,7 +332,7 @@ def render_item(template: FeedTemplate, item_node) -> str:
 
 
 def build_feed(template: FeedTemplate) -> str:
-    content = fetch_html(template.source_url, USER_AGENT)
+    content = fetch_html(template.source_url)
     document = html.fromstring(content, base_url=template.source_url)
     item_nodes = document.xpath(template.item_xpath)[:MAX_ITEMS]
     items = [render_item(template, item_node) for item_node in item_nodes]
@@ -421,7 +429,7 @@ def issue_date_from_url(url: str) -> str:
 
 
 def build_atlantic_cover_feed(config: CustomFeed) -> str:
-    content = fetch_html(config.source_url, USER_AGENT)
+    content = fetch_html(config.source_url)
     document = html.fromstring(content, base_url=config.source_url)
     document.make_links_absolute(config.source_url)
 
@@ -435,7 +443,7 @@ def build_atlantic_cover_feed(config: CustomFeed) -> str:
 
     items = []
     for issue_url in issue_links[: config.max_issues]:
-        issue_content = fetch_html(issue_url, USER_AGENT)
+        issue_content = fetch_html(issue_url)
         issue_doc = html.fromstring(issue_content, base_url=issue_url)
         issue_doc.make_links_absolute(issue_url)
 
