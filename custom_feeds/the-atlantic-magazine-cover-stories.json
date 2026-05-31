@@ -1,0 +1,8 @@
+{
+  "kind": "atlantic_magazine_cover_stories",
+  "title": "The Atlantic Magazine Cover Stories",
+  "slug": "the-atlantic-magazine-cover-stories",
+  "description": "Cover stories from The Atlantic magazine issue archive.",
+  "backissues_url": "https://www.theatlantic.com/magazine/backissues/",
+  "max_issues": 24
+}

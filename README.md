@@ -11,6 +11,7 @@ GitHub Actions reads `templates/*.opml`, scrapes each `HTML+XPath` outline, writ
 requirements.txt
 scripts/build_feed.py
 templates/
+custom_feeds/
 ```
 
 ## Add Feed Templates
@@ -22,6 +23,28 @@ templates/
 5. Run the GitHub Actions workflow.
 
 Every `HTML+XPath` outline in `templates/*.opml` becomes one RSS XML file.
+
+## Add Custom Feed Configs
+
+Custom feeds live in `custom_feeds/*.json`. They are for nested pages or sources that cannot be represented as a single FreshRSS OPML XPath template.
+
+Supported custom feed kind:
+
+```text
+atlantic_magazine_cover_stories
+```
+
+Example:
+
+```json
+{
+  "kind": "atlantic_magazine_cover_stories",
+  "title": "The Atlantic Magazine Cover Stories",
+  "slug": "the-atlantic-magazine-cover-stories",
+  "backissues_url": "https://www.theatlantic.com/magazine/backissues/",
+  "max_issues": 24
+}
+```
 
 ## Published URLs
 

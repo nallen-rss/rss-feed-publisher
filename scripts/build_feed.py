@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +19,7 @@ from readability import Document
 
 
 TEMPLATE_DIR = Path(os.environ.get("TEMPLATE_DIR", "templates"))
+CUSTOM_FEED_DIR = Path(os.environ.get("CUSTOM_FEED_DIR", "custom_feeds"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "public"))
 FEEDS_DIR = OUTPUT_DIR / "feeds"
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "50"))
@@ -51,9 +53,18 @@ class FeedTemplate:
     categories_xpath: str
     uid_xpath: str
     date_format: str
-    user_agent: str
     css_full_content: str
     css_content_filter: str
+
+
+@dataclass(frozen=True)
+class CustomFeed:
+    kind: str
+    title: str
+    slug: str
+    description: str
+    source_url: str
+    max_issues: int
 
 
 def local_name(name: str) -> str:
@@ -162,7 +173,6 @@ def template_from_outline(outline: ElementTree.Element, used_slugs: set[str]) ->
         categories_xpath=attrs.get("xPathItemCategories", ""),
         uid_xpath=attrs.get("xPathItemUid", ""),
         date_format=attrs.get("xPathItemTimeFormat", ""),
-        user_agent=attrs.get("CURLOPT_USERAGENT", "") or USER_AGENT,
         css_full_content=attrs.get("cssFullContent", ""),
         css_content_filter=attrs.get("cssContentFilter", ""),
     )
@@ -191,6 +201,29 @@ def load_templates() -> list[FeedTemplate]:
         for outline in find_template_outlines(root):
             templates.append(template_from_outline(outline, used_slugs))
     return templates
+
+
+def load_custom_feeds() -> list[CustomFeed]:
+    feeds = []
+    for path in sorted(CUSTOM_FEED_DIR.glob("*.json")):
+        config = json.loads(path.read_text(encoding="utf-8"))
+        kind = config.get("kind", "")
+        title = config.get("title") or config.get("backissues_url") or path.stem
+        source_url = config.get("backissues_url") or config.get("source_url") or ""
+        if not kind or not source_url:
+            raise ValueError(f"Missing required custom feed fields in {path}")
+
+        feeds.append(
+            CustomFeed(
+                kind=kind,
+                title=title,
+                slug=slugify(config.get("slug") or title),
+                description=config.get("description", ""),
+                source_url=source_url,
+                max_issues=int(config.get("max_issues", MAX_ITEMS)),
+            )
+        )
+    return feeds
 
 
 def extract_with_css_selector(content: bytes, url: str, selector: str, remove_selector: str) -> str:
@@ -222,7 +255,7 @@ def full_article_content(template: FeedTemplate, link: str) -> str:
         return ""
 
     try:
-        content = fetch_html(link, template.user_agent)
+        content = fetch_html(link, USER_AGENT)
         if template.css_full_content:
             extracted = extract_with_css_selector(
                 content,
@@ -291,7 +324,7 @@ def render_item(template: FeedTemplate, item_node) -> str:
 
 
 def build_feed(template: FeedTemplate) -> str:
-    content = fetch_html(template.source_url, template.user_agent)
+    content = fetch_html(template.source_url, USER_AGENT)
     document = html.fromstring(content, base_url=template.source_url)
     item_nodes = document.xpath(template.item_xpath)[:MAX_ITEMS]
     items = [render_item(template, item_node) for item_node in item_nodes]
@@ -322,14 +355,151 @@ def build_feed(template: FeedTemplate) -> str:
 """
 
 
-def write_index(templates: list[FeedTemplate]) -> None:
+def text_content(node) -> str:
+    return normalize_space(node.text_content()) if node is not None else ""
+
+
+def article_link_near_heading(document, heading_text: str) -> html.HtmlElement | None:
+    headings = document.xpath(
+        f"//*[self::h1 or self::h2 or self::h3 or self::h4][normalize-space()='{heading_text}']"
+    )
+    if not headings:
+        headings = document.xpath(
+            f"//*[contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{heading_text.lower()}')]"
+        )
+
+    for heading in headings:
+        for sibling in heading.itersiblings():
+            links = sibling.xpath(".//a[.//text()[normalize-space()] or normalize-space()]")
+            for link in links:
+                href = link.get("href", "")
+                if href and "/magazine/" in href and "/toc/" not in href:
+                    return link
+            if getattr(sibling, "tag", "") in {"h2", "h3"}:
+                break
+    return None
+
+
+def nearby_text_after_link(link: html.HtmlElement) -> str:
+    parent = link.getparent()
+    for _ in range(4):
+        if parent is None:
+            return ""
+        candidates = [
+            node
+            for node in parent.xpath(".//*[self::p or self::div]")
+            if link not in node.iterdescendants()
+        ]
+        for candidate in candidates:
+            value = text_content(candidate)
+            if value and value != text_content(link):
+                return value
+        parent = parent.getparent()
+    return ""
+
+
+def author_after_link(link: html.HtmlElement) -> str:
+    parent = link.getparent()
+    for _ in range(5):
+        if parent is None:
+            return ""
+        links = parent.xpath(".//a[contains(@href, '/author/') or contains(@href, '/authors/')]")
+        for author_link in links:
+            value = text_content(author_link)
+            if value and value != text_content(link):
+                return value
+        parent = parent.getparent()
+    return ""
+
+
+def issue_date_from_url(url: str) -> str:
+    match = re.search(r"/toc/(\d{4})/(\d{2})/", url)
+    if not match:
+        return ""
+    year, month = match.groups()
+    return format_datetime(datetime(int(year), int(month), 1, tzinfo=DEFAULT_TIMEZONE))
+
+
+def build_atlantic_cover_feed(config: CustomFeed) -> str:
+    content = fetch_html(config.source_url, USER_AGENT)
+    document = html.fromstring(content, base_url=config.source_url)
+    document.make_links_absolute(config.source_url)
+
+    issue_links = []
+    seen = set()
+    for link in document.xpath("//a[contains(@href, '/magazine/toc/')]"):
+        href = link.get("href", "")
+        if href and href not in seen:
+            seen.add(href)
+            issue_links.append(href)
+
+    items = []
+    for issue_url in issue_links[: config.max_issues]:
+        issue_content = fetch_html(issue_url, USER_AGENT)
+        issue_doc = html.fromstring(issue_content, base_url=issue_url)
+        issue_doc.make_links_absolute(issue_url)
+
+        cover_link = article_link_near_heading(issue_doc, "Cover Story")
+        if cover_link is None:
+            print(f"No cover story found for {issue_url}")
+            continue
+
+        title = text_content(cover_link)
+        link = cover_link.get("href", "")
+        description = nearby_text_after_link(cover_link)
+        author = author_after_link(cover_link)
+        pub_date = issue_date_from_url(issue_url)
+        guid = f"{issue_url}#cover-story"
+
+        optional_xml = []
+        if pub_date:
+            optional_xml.append(f"      <pubDate>{escape(pub_date)}</pubDate>")
+        if author:
+            optional_xml.append(f"      <author>{escape(author)}</author>")
+        optional_block = "\n" + "\n".join(optional_xml) if optional_xml else ""
+
+        items.append(
+            f"""    <item>
+      <title>{escape(title)}</title>
+      <link>{escape(link)}</link>
+      <guid isPermaLink="false">{escape(guid)}</guid>
+      <description><![CDATA[{cdata(escape(description))}]]></description>{optional_block}
+    </item>"""
+        )
+
+    now = datetime.now().astimezone()
+    feed_path = f"feeds/{config.slug}.xml"
+    feed_url = f"{FEED_BASE_URL}/{feed_path}" if FEED_BASE_URL else ""
+    atom_link = ""
+    if feed_url:
+        atom_link = (
+            f'\n    <atom:link href="{escape(feed_url)}" rel="self" '
+            'type="application/rss+xml" />'
+        )
+
+    description = config.description or f"Generated RSS feed for {config.source_url}"
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>{escape(config.title)}</title>
+    <link>{escape(config.source_url)}</link>
+    <description>{escape(description)}</description>
+    <language>en-us</language>
+    <lastBuildDate>{escape(format_datetime(now))}</lastBuildDate>{atom_link}
+{chr(10).join(items)}
+  </channel>
+</rss>
+"""
+
+
+def write_index(feed_links: list[tuple[str, str]]) -> None:
     rows = []
-    for template in templates:
-        path = f"feeds/{template.slug}.xml"
+    for title, slug in feed_links:
+        path = f"feeds/{slug}.xml"
         url = f"{FEED_BASE_URL}/{path}" if FEED_BASE_URL else path
         rows.append(
             "      <li>"
-            f'<a href="{escape(path)}">{escape(template.title)}</a>'
+            f'<a href="{escape(path)}">{escape(title)}</a>'
             f" <code>{escape(url)}</code>"
             "</li>"
         )
@@ -357,21 +527,36 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     FEEDS_DIR.mkdir(parents=True, exist_ok=True)
     templates = load_templates()
+    custom_feeds = load_custom_feeds()
     print(f"Loaded {len(templates)} feed template(s) from {TEMPLATE_DIR}")
+    print(f"Loaded {len(custom_feeds)} custom feed(s) from {CUSTOM_FEED_DIR}")
 
     first_feed = None
+    feed_links = []
     for template in templates:
         feed = build_feed(template)
         feed_path = FEEDS_DIR / f"{template.slug}.xml"
         feed_path.write_text(feed, encoding="utf-8")
         print(f"Wrote {feed_path}")
+        feed_links.append((template.title, template.slug))
+        if first_feed is None:
+            first_feed = feed
+
+    for custom_feed in custom_feeds:
+        if custom_feed.kind != "atlantic_magazine_cover_stories":
+            raise ValueError(f"Unsupported custom feed kind: {custom_feed.kind}")
+        feed = build_atlantic_cover_feed(custom_feed)
+        feed_path = FEEDS_DIR / f"{custom_feed.slug}.xml"
+        feed_path.write_text(feed, encoding="utf-8")
+        print(f"Wrote {feed_path}")
+        feed_links.append((custom_feed.title, custom_feed.slug))
         if first_feed is None:
             first_feed = feed
 
     if first_feed is not None:
         (OUTPUT_DIR / "feed.xml").write_text(first_feed, encoding="utf-8")
 
-    write_index(templates)
+    write_index(feed_links)
     (OUTPUT_DIR / ".nojekyll").write_text("", encoding="utf-8")
 
 
