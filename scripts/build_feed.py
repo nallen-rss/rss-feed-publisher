@@ -9,10 +9,12 @@ from pathlib import Path
 from urllib.parse import urljoin
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 import requests
 from dateutil import parser as date_parser
 from lxml import html
+from readability import Document
 
 
 TEMPLATE_DIR = Path(os.environ.get("TEMPLATE_DIR", "templates"))
@@ -22,8 +24,15 @@ MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "50"))
 FEED_BASE_URL = os.environ.get("FEED_BASE_URL", "").strip().rstrip("/")
 USER_AGENT = os.environ.get(
     "USER_AGENT",
-    "Mozilla/5.0 RSS feed generator for personal use",
+    "Mozilla/5.0 (Android 15; Mobile; rv:139.0) Gecko/139.0 Firefox/139.0",
 )
+DEFAULT_TIMEZONE = ZoneInfo(os.environ.get("DEFAULT_TIMEZONE", "America/New_York"))
+EXTRACT_FULL_CONTENT = os.environ.get("EXTRACT_FULL_CONTENT", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "readability",
+}
 
 
 @dataclass(frozen=True)
@@ -42,6 +51,9 @@ class FeedTemplate:
     categories_xpath: str
     uid_xpath: str
     date_format: str
+    user_agent: str
+    css_full_content: str
+    css_content_filter: str
 
 
 def local_name(name: str) -> str:
@@ -92,6 +104,9 @@ def parse_pub_date(value: str, date_format: str) -> str:
         parsed = datetime.strptime(value, date_format)
     else:
         parsed = date_parser.parse(value)
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=DEFAULT_TIMEZONE)
 
     return format_datetime(parsed)
 
@@ -147,7 +162,24 @@ def template_from_outline(outline: ElementTree.Element, used_slugs: set[str]) ->
         categories_xpath=attrs.get("xPathItemCategories", ""),
         uid_xpath=attrs.get("xPathItemUid", ""),
         date_format=attrs.get("xPathItemTimeFormat", ""),
+        user_agent=attrs.get("CURLOPT_USERAGENT", "") or USER_AGENT,
+        css_full_content=attrs.get("cssFullContent", ""),
+        css_content_filter=attrs.get("cssContentFilter", ""),
     )
+
+
+def fetch_html(url: str, user_agent: str) -> bytes:
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.content
 
 
 def load_templates() -> list[FeedTemplate]:
@@ -159,6 +191,51 @@ def load_templates() -> list[FeedTemplate]:
         for outline in find_template_outlines(root):
             templates.append(template_from_outline(outline, used_slugs))
     return templates
+
+
+def extract_with_css_selector(content: bytes, url: str, selector: str, remove_selector: str) -> str:
+    document = html.fromstring(content, base_url=url)
+    document.make_links_absolute(url)
+    for node in document.cssselect(remove_selector) if remove_selector else []:
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+
+    parts = []
+    for node in document.cssselect(selector):
+        parts.append(html.tostring(node, encoding="unicode", method="html"))
+    return "".join(parts).strip()
+
+
+def extract_with_readability(content: bytes, url: str) -> str:
+    article = Document(content.decode("utf-8", errors="replace")).summary(html_partial=True)
+    fragment = html.fragment_fromstring(article, create_parent="div", base_url=url)
+    fragment.make_links_absolute(url)
+    return "".join(
+        html.tostring(child, encoding="unicode", method="html")
+        for child in fragment
+    ).strip()
+
+
+def full_article_content(template: FeedTemplate, link: str) -> str:
+    if not EXTRACT_FULL_CONTENT or not link:
+        return ""
+
+    try:
+        content = fetch_html(link, template.user_agent)
+        if template.css_full_content:
+            extracted = extract_with_css_selector(
+                content,
+                link,
+                template.css_full_content,
+                template.css_content_filter,
+            )
+            if extracted:
+                return extracted
+        return extract_with_readability(content, link)
+    except Exception as error:
+        print(f"Full-content extraction failed for {link}: {error}")
+        return ""
 
 
 def render_item(template: FeedTemplate, item_node) -> str:
@@ -184,7 +261,10 @@ def render_item(template: FeedTemplate, item_node) -> str:
     description_parts = []
     if thumbnail:
         description_parts.append(f'<p><img src="{escape(thumbnail)}" alt="" /></p>')
-    if content:
+    article_content = full_article_content(template, link)
+    if article_content:
+        description_parts.append(article_content)
+    elif content:
         description_parts.append(f"<p>{escape(content)}</p>")
     description = "".join(description_parts)
 
@@ -211,14 +291,8 @@ def render_item(template: FeedTemplate, item_node) -> str:
 
 
 def build_feed(template: FeedTemplate) -> str:
-    response = requests.get(
-        template.source_url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    document = html.fromstring(response.content, base_url=template.source_url)
+    content = fetch_html(template.source_url, template.user_agent)
+    document = html.fromstring(content, base_url=template.source_url)
     item_nodes = document.xpath(template.item_xpath)[:MAX_ITEMS]
     items = [render_item(template, item_node) for item_node in item_nodes]
     items = [item for item in items if item]

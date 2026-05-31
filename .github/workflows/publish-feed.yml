@@ -39,6 +39,8 @@ jobs:
       - name: Build RSS feeds
         env:
           FEED_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          USER_AGENT: Mozilla/5.0 (Android 15; Mobile; rv:139.0) Gecko/139.0 Firefox/139.0
+          EXTRACT_FULL_CONTENT: "readability"
           MAX_ITEMS: "50"
         run: python scripts/build_feed.py
 
