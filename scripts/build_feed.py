@@ -153,7 +153,8 @@ def template_from_outline(outline: ElementTree.Element, used_slugs: set[str]) ->
 def load_templates() -> list[FeedTemplate]:
     used_slugs: set[str] = set()
     templates = []
-    for path in sorted(TEMPLATE_DIR.glob("*.opml")):
+    paths = sorted({*TEMPLATE_DIR.glob("*.opml"), *TEMPLATE_DIR.glob("*.opml.xml")})
+    for path in paths:
         root = ElementTree.parse(path).getroot()
         for outline in find_template_outlines(root):
             templates.append(template_from_outline(outline, used_slugs))
@@ -282,12 +283,14 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     FEEDS_DIR.mkdir(parents=True, exist_ok=True)
     templates = load_templates()
+    print(f"Loaded {len(templates)} feed template(s) from {TEMPLATE_DIR}")
 
     first_feed = None
     for template in templates:
         feed = build_feed(template)
         feed_path = FEEDS_DIR / f"{template.slug}.xml"
         feed_path.write_text(feed, encoding="utf-8")
+        print(f"Wrote {feed_path}")
         if first_feed is None:
             first_feed = feed
 
