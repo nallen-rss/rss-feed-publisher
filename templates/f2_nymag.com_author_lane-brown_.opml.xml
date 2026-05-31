@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml xmlns:frss="https://freshrss.org/opml" version="2.0">
+  <head>
+    <title>FreshRSS</title>
+  </head>
+  <body>
+    <outline text="nymag.com/author/lane-brown/" type="HTML+XPath" xmlUrl="https://nymag.com/author/lane-brown/" htmlUrl="https://nymag.com/author/lane-brown/" description="RSS feed of nymag.com/author/lane-brown/" frss:xPathItem="//section[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; paginated-feed &quot;)]//li[@data-track-type=&quot;article-link&quot;]" frss:xPathItemTitle=".//span[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; headline &quot;)]" frss:xPathItemContent=".//span[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; teaser &quot;)]" frss:xPathItemUri=".//a[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; link-text &quot;)]/@href" frss:xPathItemAuthor="@data-track-authors" frss:xPathItemTimestamp=".//time[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; paginate-time &quot;)]" frss:xPathItemThumbnail=".//img[contains(concat(&quot; &quot;, normalize-space(@class), &quot; &quot;), &quot; article-img &quot;)]/@src"/>
+  </body>
+</opml>
